@@ -1,7 +1,9 @@
 streamlit
 pandas
 openpyxl
+xlrd
 openai
+xlsxwriter
 fpdf2
 arabic-reshaper
 python-bidi
