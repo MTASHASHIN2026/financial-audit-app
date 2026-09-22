@@ -55,12 +55,16 @@ with st.sidebar:
 # ==========================================
 def process_uploaded_file(uploaded_file) -> pd.DataFrame:
     file_type = uploaded_file.name.split('.')[-1].lower()
-    
     try:
         if file_type in ['xlsx', 'xls']:
-            return pd.read_excel(uploaded_file)
+            # قراءة الإكسيل مع إزالة الفراغات من عناوين الأعمدة لتجنب أخطاء القراءة
+            df = pd.read_excel(uploaded_file)
+            df.columns = [str(col).strip() for col in df.columns]
+            return df
         elif file_type == 'csv':
-            return pd.read_csv(uploaded_file)
+            df = pd.read_csv(uploaded_file)
+            df.columns = [str(col).strip() for col in df.columns]
+            return df
         else:
             # نموذج استخراج محاكي للملفات المصورة والـ PDF
             st.info(f"تم استلام ملف بصيغة ({file_type.upper()}). يتم تحليله بواسطة محرك الاستخراج...")
@@ -93,15 +97,25 @@ class TrialBalanceAuditor:
 
     def run_audit(self):
         cols = self.df.columns
-        debit_col = [c for c in cols if 'debit' in str(c).lower() or 'مدين' in str(c)]
-        credit_col = [c for c in cols if 'credit' in str(c).lower() or 'دائن' in str(c)]
+        # تحسين البحث عن أسماء الأعمدة لتشمل تنويعات أكثر
+        debit_col = [c for c in cols if 'debit' in str(c).lower() or 'مدين' in str(c) or 'منه' in str(c)]
+        credit_col = [c for c in cols if 'credit' in str(c).lower() or 'دائن' in str(c) or 'له' in str(c)]
         code_col = [c for c in cols if 'code' in str(c).lower() or 'رمز' in str(c) or 'رقم' in str(c)]
-        name_col = [c for c in cols if 'name' in str(c).lower() or 'اسم' in str(c) or 'حساب' in str(c)]
+        name_col = [c for c in cols if 'name' in str(c).lower() or 'اسم' in str(c) or 'حساب' in str(c) or 'بيان' in str(c)]
 
-        d_col = debit_col[0] if debit_col else self.df.columns[2]
-        c_col = credit_col[0] if credit_col else self.df.columns[3]
+        # إذا لم يجد الأعمدة بالاسم، يفترض الترتيب الافتراضي
+        d_col = debit_col[0] if debit_col else (self.df.columns[2] if len(self.df.columns) > 2 else None)
+        c_col = credit_col[0] if credit_col else (self.df.columns[3] if len(self.df.columns) > 3 else None)
         cd_col = code_col[0] if code_col else self.df.columns[0]
-        nm_col = name_col[0] if name_col else self.df.columns[1]
+        nm_col = name_col[0] if name_col else (self.df.columns[1] if len(self.df.columns) > 1 else None)
+
+        if not d_col or not c_col:
+            self.audit_results["summary"] = {"total_debit": 0, "total_credit": 0, "difference": 0}
+            return self.audit_results
+
+        # تنظيف البيانات وتحويلها لأرقام لتفادي أخطاء النصوص
+        self.df[d_col] = pd.to_numeric(self.df[d_col], errors='coerce').fillna(0)
+        self.df[c_col] = pd.to_numeric(self.df[c_col], errors='coerce').fillna(0)
 
         total_debit = float(self.df[d_col].sum())
         total_credit = float(self.df[c_col].sum())
@@ -114,9 +128,9 @@ class TrialBalanceAuditor:
 
         for _, row in self.df.iterrows():
             code = str(row[cd_col])
-            name = str(row[nm_col])
-            debit = float(row[d_col] or 0)
-            credit = float(row[c_col] or 0)
+            name = str(row[nm_col]) if nm_col else "غير معروف"
+            debit = float(row[d_col])
+            credit = float(row[c_col])
             net = debit - credit
 
             # 1. الأرصدة الشاذة
@@ -131,13 +145,13 @@ class TrialBalanceAuditor:
                     })
 
             # 2. فحص النقدية
-            if check_cash and ("صندوق" in name or "بنك" in name) and net < 0:
+            if check_cash and ("صندوق" in name or "بنك" in name or "نقد" in name) and net < 0:
                 self.audit_results["bank_cash_warnings"].append({
                     "الكود": code, "الحساب": name, "التحذير": f"سحب على المكشوف/عجز نقدي بقيمة {abs(net):,.2f}"
                 })
 
             # 3. الحسابات الوسيطة
-            if check_suspense and any(k in name for k in ["وسيط", "تسوية", "عهد"]):
+            if check_suspense and any(k in name for k in ["وسيط", "تسوية", "عهد", "مؤقت"]):
                 if net != 0:
                     self.audit_results["suspense_accounts"].append({
                         "الكود": code, "الحساب": name, "الرصيد المعلق": f"{net:,.2f}"
@@ -237,7 +251,7 @@ if uploaded_file is not None:
                         client = OpenAI(api_key=api_key)
                         prompt = f"""
                         أنت رئيس تدقيق مالي ورقابة داخلية. قم بكتابة تقرير تدقيق مالي واحترافي بناءً على نتائج الفحص الآلي لميزان المراجعة التالي:
-                        {json.dumps(results, ensure_ascii=False, indent=2)}
+                        {json.dumps(results, ensure_ascii=True, indent=2)}
 
                         قم بتنسيق التقرير ليشمل:
                         1. ملخص تنفيذي.
