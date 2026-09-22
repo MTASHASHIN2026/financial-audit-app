@@ -56,6 +56,7 @@ def process_uploaded_file(uploaded_file) -> pd.DataFrame:
         if file_type in ['xlsx', 'xls']:
             df = pd.read_excel(uploaded_file, header=None)
             
+            # محرك البحث الذكي عن صف العناوين في أول 20 صف
             header_idx = 0
             for i in range(min(20, len(df))):
                 row_text = ' '.join(str(x) for x in df.iloc[i].values).lower()
@@ -129,16 +130,16 @@ class TrialBalanceAuditor:
             if check_abnormal:
                 if code.startswith(('1', '5')) and net < 0:
                     self.audit_results["abnormal_balances"].append({
-                        "الكود": code, "الحساب": name, "الخلل": f"رصيد دائن شاذ بقيمة {abs(net):,.2f}"
+                        "الكود": code, "الحساب": name, "الخلل": f"رصيد دائن شاذ قدره {abs(net):,.2f}"
                     })
                 elif code.startswith(('2', '3', '4')) and net > 0:
                     self.audit_results["abnormal_balances"].append({
-                        "الكود": code, "الحساب": name, "الخلل": f"رصيد مدين شاذ بقيمة {net:,.2f}"
+                        "الكود": code, "الحساب": name, "الخلل": f"رصيد مدين شاذ قدره {net:,.2f}"
                     })
 
             if check_cash and ("صندوق" in name or "بنك" in name or "نقد" in name) and net < 0:
                 self.audit_results["bank_cash_warnings"].append({
-                    "الكود": code, "الحساب": name, "التحذير": f"سحب على المكشوف/عجز بقيمة {abs(net):,.2f}"
+                    "الكود": code, "الحساب": name, "التحذير": f"سحب على المكشوف/عجز نقدي بقيمة {abs(net):,.2f}"
                 })
 
             if check_suspense and any(k in name for k in ["وسيط", "تسوية", "عهد", "مؤقت"]):
@@ -238,30 +239,25 @@ if uploaded_file is not None:
             else:
                 with st.spinner("جاري صياغة التقرير المالي بواسطة الذكاء الاصطناعي..."):
                     try:
-                        # إنشاء العميل مع ضبط الاتصال ليتوافق تماماً مع النصوص العربية والتشفير القياسي
                         client = OpenAI(api_key=api_key)
                         
-                        # تجميع الملخص بأمان تام بدون مشاكل ترميز
-                        total_d = f"{summary['total_debit']:,.2f}"
-                        total_c = f"{summary['total_credit']:,.2f}"
-                        diff_val = f"{summary['difference']:,.2f}"
-                        
-                        count_abnormal = len(results["abnormal_balances"])
-                        count_warnings = len(results["bank_cash_warnings"] + results["suspense_accounts"])
+                        # تحويل النتائج إلى نص آمن تماماً بدون استخدام json لتفادي أخطاء ASCII
+                        summary_text = f"إجمالي المدين: {summary['total_debit']}, إجمالي الدائن: {summary['total_credit']}, الفارق: {summary['difference']}"
+                        abnormal_text = str(results["abnormal_balances"])
+                        warnings_text = str(results["bank_cash_warnings"] + results["suspense_accounts"])
 
-                        prompt = (
-                            "أنت رئيس تدقيق مالي ورقابة داخلية. قم بكتابة تقرير تدقيق مالي واحترافي بناءً على مؤشرات ميزان المراجعة التالي:\n"
-                            f"- إجمالي المدين: {total_d}\n"
-                            f"- إجمالي الدائن: {total_c}\n"
-                            f"- الفارق الحسابي: {diff_val}\n"
-                            f"- عدد الأرصدة الشاذة المكتشفة: {count_abnormal}\n"
-                            f"- عدد تنبيهات النقدية والوسيطة: {count_warnings}\n\n"
-                            "اكتب التقرير باللغة العربية الفصحى وبشكل مهني ليتضمن:\n"
-                            "1. ملخص تنفيذي.\n"
-                            "2. تحليل المخاطر والأرصدة الشاذة.\n"
-                            "3. تقييم السيولة والنقدية.\n"
-                            "4. التوصيات والإجراءات التصحيحية الفورية."
-                        )
+                        prompt = f"""
+                        أنت رئيس تدقيق مالي ورقابة داخلية. قم بكتابة تقرير تدقيق مالي واحترافي بناءً على بيانات ميزان المراجعة التالية:
+                        - الملخص المالي: {summary_text}
+                        - الأرصدة الشاذة المكتشفة: {abnormal_text}
+                        - تنبيهات النقدية والوسيطة: {warnings_text}
+
+                        قم بتنسيق التقرير ليشمل:
+                        1. ملخص تنفيذي.
+                        2. تحليل المخاطر والأرصدة الشاذة.
+                        3. تقييم السيولة والنقدية.
+                        4. التوصيات والإجراءات التصحيحية الواجب اتخاذها فوراً.
+                        """
                         
                         response = client.chat.completions.create(
                             model="gpt-4o",
@@ -270,7 +266,7 @@ if uploaded_file is not None:
                         )
                         st.session_state['report_content'] = response.choices[0].message.content
                     except Exception as e:
-                        st.error(f"حدث خطأ أثناء الاتصال بالنظام: {str(e).encode('utf-8', 'ignore').decode('utf-8')}")
+                        st.error(f"حدث خطأ أثناء الاتصال بالنظام: {e}")
 
         if 'report_content' in st.session_state:
             st.subheader("📋 التقرير الرقابي النهائي")
