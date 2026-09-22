@@ -54,10 +54,9 @@ def process_uploaded_file(uploaded_file) -> pd.DataFrame:
     file_type = uploaded_file.name.split('.')[-1].lower()
     try:
         if file_type in ['xlsx', 'xls']:
-            # قراءة الملف بدون عناوين مسبقة للبحث عن الصف الصحيح
             df = pd.read_excel(uploaded_file, header=None)
             
-            # محرك البحث الذكي عن صف العناوين (يقرأ أول 20 صف)
+            # محرك البحث الذكي عن صف العناوين في أول 20 صف
             header_idx = 0
             for i in range(min(20, len(df))):
                 row_text = ' '.join(str(x) for x in df.iloc[i].values).lower()
@@ -65,11 +64,8 @@ def process_uploaded_file(uploaded_file) -> pd.DataFrame:
                     header_idx = i
                     break
                     
-            # تعيين الصف المكتشف كعنوان وحذف ما قبله
             df.columns = df.iloc[header_idx].astype(str).str.strip()
             df = df.iloc[header_idx + 1:].reset_index(drop=True)
-            
-            # حذف الأعمدة الفارغة تماماً
             df = df.dropna(axis=1, how='all')
             return df
             
@@ -112,15 +108,190 @@ class TrialBalanceAuditor:
             self.audit_results["summary"] = {"total_debit": 0, "total_credit": 0, "difference": 0}
             return self.audit_results
 
-        # تنظيف البيانات وتحويلها لأرقام
         self.df[d_col] = pd.to_numeric(self.df[d_col], errors='coerce').fillna(0)
-        self.يظهر في ملف "خطا.png" رسالة الخطأ التالية: `حدث خطأ أثناء الاتصال بالنظام: 'ascii' codec can't encode characters in position 15-16: ordinal not in range(128)` وذلك بعد محاولة توليد التقرير الرقابي الشامل[cite: 1].
+        self.df[c_col] = pd.to_numeric(self.df[c_col], errors='coerce').fillna(0)
 
-هذا الخطأ البرمجي (والذي يحدث غالباً في بيئة بايثون) ينتج عندما يحاول النظام معالجة، أو إرسال، أو طباعة نصوص تحتوي على أحرف عربية (مثل اسم الملف المرفوع "ميزان م...9-2026.xls" أو البيانات المحاسبية المستخرجة منه) باستخدام ترميز `ASCII` القديم الذي لا يدعم سوى الأحرف الإنجليزية، بدلاً من ترميز `UTF-8` العالمي[cite: 1].
+        total_debit = float(self.df[d_col].sum())
+        total_credit = float(self.df[c_col].sum())
+        
+        self.audit_results["summary"] = {
+            "total_debit": total_debit,
+            "total_credit": total_credit,
+            "difference": round(total_debit - total_credit, 2)
+        }
 
-لحل هذه المشكلة في الكود المصدري للتطبيق، يجب تطبيق التعديلات التالية بناءً على مكان حدوث الخطأ:
+        for _, row in self.df.iterrows():
+            code = str(row[cd_col])
+            name = str(row[nm_col]) if nm_col else "غير معروف"
+            debit = float(row[d_col])
+            credit = float(row[c_col])
+            net = debit - credit
 
-*   **تجهيز البيانات لـ API الذكاء الاصطناعي:** عند تحويل البيانات المحاسبية إلى نصوص (JSON) لإرسالها إلى نموذج الذكاء الاصطناعي، يجب التأكد من استخدام `ensure_ascii=False` داخل دالة `json.dumps()` لضمان عدم تحويل الأحرف العربية إلى رموز غير مقروءة.
-*   **إعدادات الاتصال (HTTP Requests):** إذا كان التطبيق يستخدم مكتبة مثل `requests` للاتصال بالنظام الخارجي، تأكد من إضافة `charset=utf-8` إلى ترويسة الطلب: `{'Content-Type': 'application/json; charset=utf-8'}`.
-*   **قراءة وكتابة الملفات:** في أي مكان يقوم فيه الكود بفتح ملفات نصية أو حفظ سجلات (Logs)، يجب تحديد الترميز صراحةً بإضافة `encoding='utf-8'` (على سبيل المثال: `open(filename, 'r', encoding='utf-8')`).
-*   **متغيرات بيئة التشغيل (Environment Variables):** إذا كان التطبيق مستضافاً على خادم أو يعمل عبر سطر الأوامر، قد تحتاج إلى إجبار بايثون على استخدام UTF-8 كترميز افتراضي عن طريق ضبط المتغير `PYTHONIOENCODING=utf-8`.
+            if check_abnormal:
+                if code.startswith(('1', '5')) and net < 0:
+                    self.audit_results["abnormal_balances"].append({
+                        "الكود": code, "الحساب": name, "الخلل": f"رصيد دائن شاذ قدره {abs(net):,.2f}"
+                    })
+                elif code.startswith(('2', '3', '4')) and net > 0:
+                    self.audit_results["abnormal_balances"].append({
+                        "الكود": code, "الحساب": name, "الخلل": f"رصيد مدين شاذ قدره {net:,.2f}"
+                    })
+
+            if check_cash and ("صندوق" in name or "بنك" in name or "نقد" in name) and net < 0:
+                self.audit_results["bank_cash_warnings"].append({
+                    "الكود": code, "الحساب": name, "التحذير": f"سحب على المكشوف/عجز نقدي بقيمة {abs(net):,.2f}"
+                })
+
+            if check_suspense and any(k in name for k in ["وسيط", "تسوية", "عهد", "مؤقت"]):
+                if net != 0:
+                    self.audit_results["suspense_accounts"].append({
+                        "الكود": code, "الحساب": name, "الرصيد المعلق": f"{net:,.2f}"
+                    })
+
+        return self.audit_results
+
+# ==========================================
+# 5. دوال إنشاء واستخراج التقارير (Excel & PDF)
+# ==========================================
+def generate_excel_export(results: dict, df_original: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        pd.DataFrame([results.get("summary", {})]).to_excel(writer, sheet_name='الملخص العام', index=False)
+        if results.get("abnormal_balances"):
+            pd.DataFrame(results["abnormal_balances"]).to_excel(writer, sheet_name='الأرصدة الشاذة', index=False)
+        warnings = results.get("bank_cash_warnings", []) + results.get("suspense_accounts", [])
+        if warnings:
+            pd.DataFrame(warnings).to_excel(writer, sheet_name='التنبيهات والمخاطر', index=False)
+        df_original.to_excel(writer, sheet_name='ميزان المراجعة الأصلي', index=False)
+    return output.getvalue()
+
+def fix_arabic_text(text: str) -> str:
+    reshaped_text = arabic_reshaper.reshape(text)
+    return get_display(reshaped_text)
+
+def generate_pdf_report(report_md_text: str) -> bytes:
+    pdf = FPDF()
+    pdf.add_page()
+    font_path = "Amiri-Regular.ttf"
+    if os.path.exists(font_path):
+        pdf.add_font("Amiri", "", font_path)
+        pdf.set_font("Amiri", size=11)
+    else:
+        pdf.set_font("Arial", size=11)
+
+    pdf.set_auto_page_break(auto=True, margin=15)
+    for line in report_md_text.split("\n"):
+        cleaned = line.replace("#", "").replace("*", "").strip()
+        if cleaned:
+            pdf.multi_cell(0, 8, txt=fix_arabic_text(cleaned), align="R")
+            pdf.ln(1)
+    return bytes(pdf.output())
+
+# ==========================================
+# 6. واجهة العرض الرئيسية والتفاعل
+# ==========================================
+uploaded_file = st.file_uploader(
+    "قم بسحب وإسقاط ملف ميزان المراجعة هنا:", 
+    type=["xlsx", "xls", "csv"]
+)
+
+if uploaded_file is not None:
+    df = process_uploaded_file(uploaded_file)
+    
+    if not df.empty:
+        st.success("تم استخراج وقراءة البيانات بنجاح!")
+        
+        auditor = TrialBalanceAuditor(df)
+        results = auditor.run_audit()
+        summary = results["summary"]
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("إجمالي المدين", f"{summary['total_debit']:,.2f}")
+        col2.metric("إجمالي الدائن", f"{summary['total_credit']:,.2f}")
+        diff = summary['difference']
+        col3.metric("الفارق الحسابي", f"{diff:,.2f}", delta_color="normal" if diff == 0 else "inverse")
+
+        with st.expander("📄 معاينة جدول ميزان المراجعة", expanded=False):
+            st.dataframe(df, use_container_width=True)
+
+        st.subheader("🔍 نتائج التدقيق الرقابي الآلي")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("**⚠️ الأرصدة الشاذة المكتشفة:**")
+            if results["abnormal_balances"]:
+                st.dataframe(pd.DataFrame(results["abnormal_balances"]), use_container_width=True)
+            else:
+                st.info("لا توجد أرصدة شاذة.")
+
+        with c2:
+            st.write("**🚨 تنبيهات النقدية والحسابات الوسيطة:**")
+            warnings = results["bank_cash_warnings"] + results["suspense_accounts"]
+            if warnings:
+                st.dataframe(pd.DataFrame(warnings), use_container_width=True)
+            else:
+                st.info("لا توجد ملاحظات على النقدية أو الحسابات الوسيطة.")
+
+        st.divider()
+
+        if st.button("🚀 توليد التقرير الرقابي الشامل (AI Report)", type="primary"):
+            if not api_key:
+                st.warning("يرجى إدخال مفتاح OpenAI API Key في القائمة الجانبية لتوليد التقرير.")
+            else:
+                with st.spinner("جاري صياغة التقرير المالي بواسطة الذكاء الاصطناعي..."):
+                    try:
+                        client = OpenAI(api_key=api_key)
+                        
+                        # تحويل النتائج إلى نص آمن تماماً بدون استخدام json لتفادي أخطاء ASCII
+                        summary_text = f"إجمالي المدين: {summary['total_debit']}, إجمالي الدائن: {summary['total_credit']}, الفارق: {summary['difference']}"
+                        abnormal_text = str(results["abnormal_balances"])
+                        warnings_text = str(results["bank_cash_warnings"] + results["suspense_accounts"])
+
+                        prompt = f"""
+                        أنت رئيس تدقيق مالي ورقابة داخلية. قم بكتابة تقرير تدقيق مالي واحترافي بناءً على بيانات ميزان المراجعة التالية:
+                        - الملخص المالي: {summary_text}
+                        - الأرصدة الشاذة المكتشفة: {abnormal_text}
+                        - تنبيهات النقدية والوسيطة: {warnings_text}
+
+                        قم بتنسيق التقرير ليشمل:
+                        1. ملخص تنفيذي.
+                        2. تحليل المخاطر والأرصدة الشاذة.
+                        3. تقييم السيولة والنقدية.
+                        4. التوصيات والإجراءات التصحيحية الواجب اتخاذها فوراً.
+                        """
+                        
+                        response = client.chat.completions.create(
+                            model="gpt-4o",
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.2
+                        )
+                        st.session_state['report_content'] = response.choices[0].message.content
+                    except Exception as e:
+                        st.error(f"حدث خطأ أثناء الاتصال بالنظام: {e}")
+
+        if 'report_content' in st.session_state:
+            st.subheader("📋 التقرير الرقابي النهائي")
+            st.markdown(st.session_state['report_content'])
+            
+            st.divider()
+            st.subheader("📥 تصدير النتائج والتقارير")
+            col_ex, col_pdf = st.columns(2)
+            
+            with col_ex:
+                excel_bytes = generate_excel_export(results, df)
+                st.download_button(
+                    label="📊 تحميل نتائج الفحص (Excel)",
+                    data=excel_bytes,
+                    file_name="Trial_Balance_Audit_Results.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+
+            with col_pdf:
+                pdf_bytes = generate_pdf_report(st.session_state['report_content'])
+                st.download_button(
+                    label="📄 تحميل التقرير النهائي (PDF)",
+                    data=pdf_bytes,
+                    file_name="Financial_Audit_Report.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
