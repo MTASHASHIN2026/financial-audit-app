@@ -4,14 +4,10 @@ import pandas as pd
 import streamlit as st
 from openai import OpenAI
 
-# مكتبات تصدير PDF وإصلاح النص العربي
 from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# ==========================================
-# 1. إعدادات الصفحة وواجهة المستخدم
-# ==========================================
 st.set_page_config(
     page_title="المساعد الذكي لتدقيق ميزان المراجعة",
     page_icon="📊",
@@ -29,12 +25,8 @@ st.markdown("""
 st.title("📊 نظام المساعد الذكي لتدقيق ميزان المراجعة")
 st.caption("قم برفع ملف ميزان المراجعة لفحصه محاسبياً وتوليد التقرير الرقابي.")
 
-# ==========================================
-# 2. القائمة الجانبية (Sidebar)
-# ==========================================
 with st.sidebar:
     st.header("⚙️ الإعدادات والمفاتيح")
-    
     api_key = st.secrets.get("OPENAI_API_KEY", "")
     if not api_key:
         api_key = st.text_input("أدخل مفتاح OpenAI API Key:", type="password")
@@ -47,28 +39,21 @@ with st.sidebar:
     check_cash = st.checkbox("فحص النقدية", value=True)
     check_suspense = st.checkbox("فحص الحسابات الوسيطة", value=True)
 
-# ==========================================
-# 3. معالجة وقراءة الملفات (مع الباحث الذكي)
-# ==========================================
 def process_uploaded_file(uploaded_file) -> pd.DataFrame:
     file_type = uploaded_file.name.split('.')[-1].lower()
     try:
         if file_type in ['xlsx', 'xls']:
             df = pd.read_excel(uploaded_file, header=None)
-            
-            # محرك البحث الذكي عن صف العناوين في أول 20 صف
             header_idx = 0
-            for i in range(min(20, len(df))):
+            for i in range(min(25, len(df))):
                 row_text = ' '.join(str(x) for x in df.iloc[i].values).lower()
-                if any(k in row_text for k in ['مدين', 'دائن', 'debit', 'credit']):
+                if any(k in row_text for k in ['مدين', 'دائن', 'debit', 'credit', 'رصيد', 'account']):
                     header_idx = i
                     break
-                    
             df.columns = df.iloc[header_idx].astype(str).str.strip()
             df = df.iloc[header_idx + 1:].reset_index(drop=True)
             df = df.dropna(axis=1, how='all')
             return df
-            
         elif file_type == 'csv':
             df = pd.read_csv(uploaded_file)
             df.columns = [str(col).strip() for col in df.columns]
@@ -79,9 +64,6 @@ def process_uploaded_file(uploaded_file) -> pd.DataFrame:
         st.error(f"حدث خطأ أثناء قراءة الملف: {e}")
         return pd.DataFrame()
 
-# ==========================================
-# 4. محرك الفحص والتدقيق البرمجي
-# ==========================================
 class TrialBalanceAuditor:
     def __init__(self, df: pd.DataFrame):
         self.df = df
@@ -96,8 +78,8 @@ class TrialBalanceAuditor:
         cols = self.df.columns
         debit_col = [c for c in cols if 'debit' in str(c).lower() or 'مدين' in str(c) or 'منه' in str(c)]
         credit_col = [c for c in cols if 'credit' in str(c).lower() or 'دائن' in str(c) or 'له' in str(c)]
-        code_col = [c for c in cols if 'code' in str(c).lower() or 'رمز' in str(c) or 'رقم' in str(c)]
-        name_col = [c for c in cols if 'name' in str(c).lower() or 'اسم' in str(c) or 'حساب' in str(c) or 'بيان' in str(c)]
+        code_col = [c for c in cols if 'code' in str(c).lower() or 'رمز' in str(c) or 'رقم' in str(c) or 'الحساب' in str(c)]
+        name_col = [c for c in cols if 'name' in str(c).lower() or 'اسم' in str(c) or 'بيان' in str(c) or 'الوصف' in str(c)]
 
         d_col = debit_col[0] if debit_col else (self.df.columns[2] if len(self.df.columns) > 2 else None)
         c_col = credit_col[0] if credit_col else (self.df.columns[3] if len(self.df.columns) > 3 else None)
@@ -121,38 +103,42 @@ class TrialBalanceAuditor:
         }
 
         for _, row in self.df.iterrows():
-            code = str(row[cd_col])
+            raw_code = str(row[cd_col])
+            # استخراج أول رقم بريدي/حسابي صحيح بغض النظر عن الحروف المجاورة
+            code_digits = ''.join(filter(str.isdigit, raw_code))
+            first_digit = code_digits[0] if code_digits else ""
+            
             name = str(row[nm_col]) if nm_col else "غير معروف"
             debit = float(row[d_col])
             credit = float(row[c_col])
             net = debit - credit
 
-            if check_abnormal:
-                if code.startswith(('1', '5')) and net < 0:
+            # 1. فحص الأرصدة الشاذة (مع مرونة استخراج الأرقام)
+            if check_abnormal and first_digit:
+                if first_digit in ['1', '5'] and net < 0:
                     self.audit_results["abnormal_balances"].append({
-                        "الكود": code, "الحساب": name, "الخلل": f"رصيد دائن شاذ قدره {abs(net):,.2f}"
+                        "الكود": raw_code, "الحساب": name, "الخلل": f"رصيد دائن شاذ (أصول/مصاريف) بقيمة {abs(net):,.2f}"
                     })
-                elif code.startswith(('2', '3', '4')) and net > 0:
+                elif first_digit in ['2', '3', '4'] and net > 0:
                     self.audit_results["abnormal_balances"].append({
-                        "الكود": code, "الحساب": name, "الخلل": f"رصيد مدين شاذ قدره {net:,.2f}"
+                        "الكود": raw_code, "الحساب": name, "الخلل": f"رصيد مدين شاذ (التزامات/إيرادات) بقيمة {net:,.2f}"
                     })
 
-            if check_cash and ("صندوق" in name or "بنك" in name or "نقد" in name) and net < 0:
+            # 2. فحص النقدية (توسيع الكلمات المفتاحية)
+            if check_cash and any(k in name for k in ["صندوق", "بنك", "نقد", "خزين", "مصرف", "جاري"]) and net < 0:
                 self.audit_results["bank_cash_warnings"].append({
-                    "الكود": code, "الحساب": name, "التحذير": f"سحب على المكشوف/عجز نقدي بقيمة {abs(net):,.2f}"
+                    "الكود": raw_code, "الحساب": name, "التحذير": f"سحب على المكشوف أو عجز نقدي بقيمة {abs(net):,.2f}"
                 })
 
-            if check_suspense and any(k in name for k in ["وسيط", "تسوية", "عهد", "مؤقت"]):
+            # 3. الحسابات الوسيطة (توسيع الكلمات المفتاحية)
+            if check_suspense and any(k in name for k in ["وسيط", "تسوية", "عهد", "مؤقت", "معلق", "تحت التسوية"]):
                 if net != 0:
                     self.audit_results["suspense_accounts"].append({
-                        "الكود": code, "الحساب": name, "الرصيد المعلق": f"{net:,.2f}"
+                        "الكود": raw_code, "الحساب": name, "الرصيد المعلق": f"{net:,.2f}"
                     })
 
         return self.audit_results
 
-# ==========================================
-# 5. دوال إنشاء واستخراج التقارير (Excel & PDF)
-# ==========================================
 def generate_excel_export(results: dict, df_original: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -166,8 +152,7 @@ def generate_excel_export(results: dict, df_original: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 def fix_arabic_text(text: str) -> str:
-    reshaped_text = arabic_reshaper.reshape(text)
-    return get_display(reshaped_text)
+    return get_display(arabic_reshaper.reshape(text))
 
 def generate_pdf_report(report_md_text: str) -> bytes:
     pdf = FPDF()
@@ -187,9 +172,6 @@ def generate_pdf_report(report_md_text: str) -> bytes:
             pdf.ln(1)
     return bytes(pdf.output())
 
-# ==========================================
-# 6. واجهة العرض الرئيسية والتفاعل
-# ==========================================
 uploaded_file = st.file_uploader(
     "قم بسحب وإسقاط ملف ميزان المراجعة هنا:", 
     type=["xlsx", "xls", "csv"]
@@ -221,7 +203,7 @@ if uploaded_file is not None:
             if results["abnormal_balances"]:
                 st.dataframe(pd.DataFrame(results["abnormal_balances"]), use_container_width=True)
             else:
-                st.info("لا توجد أرصدة شاذة.")
+                st.info("لا توجد أرصدة شاذة مطابقة للمعايير.")
 
         with c2:
             st.write("**🚨 تنبيهات النقدية والحسابات الوسيطة:**")
@@ -240,24 +222,26 @@ if uploaded_file is not None:
                 with st.spinner("جاري صياغة التقرير المالي بواسطة الذكاء الاصطناعي..."):
                     try:
                         client = OpenAI(api_key=api_key)
+                        total_d = f"{summary['total_debit']:,.2f}"
+                        total_c = f"{summary['total_credit']:,.2f}"
+                        diff_val = f"{summary['difference']:,.2f}"
                         
-                        # تحويل النتائج إلى نص آمن تماماً بدون استخدام json لتفادي أخطاء ASCII
-                        summary_text = f"إجمالي المدين: {summary['total_debit']}, إجمالي الدائن: {summary['total_credit']}, الفارق: {summary['difference']}"
-                        abnormal_text = str(results["abnormal_balances"])
-                        warnings_text = str(results["bank_cash_warnings"] + results["suspense_accounts"])
+                        count_abnormal = len(results["abnormal_balances"])
+                        count_warnings = len(results["bank_cash_warnings"] + results["suspense_accounts"])
 
-                        prompt = f"""
-                        أنت رئيس تدقيق مالي ورقابة داخلية. قم بكتابة تقرير تدقيق مالي واحترافي بناءً على بيانات ميزان المراجعة التالية:
-                        - الملخص المالي: {summary_text}
-                        - الأرصدة الشاذة المكتشفة: {abnormal_text}
-                        - تنبيهات النقدية والوسيطة: {warnings_text}
-
-                        قم بتنسيق التقرير ليشمل:
-                        1. ملخص تنفيذي.
-                        2. تحليل المخاطر والأرصدة الشاذة.
-                        3. تقييم السيولة والنقدية.
-                        4. التوصيات والإجراءات التصحيحية الواجب اتخاذها فوراً.
-                        """
+                        prompt = (
+                            "أنت رئيس تدقيق مالي ورقابة داخلية. قم بكتابة تقرير تدقيق مالي واحترافي بناءً على مؤشرات ميزان المراجعة التالي:\n"
+                            f"- إجمالي المدين: {total_d}\n"
+                            f"- إجمالي الدائن: {total_c}\n"
+                            f"- الفارق الحسابي: {diff_val}\n"
+                            f"- عدد الأرصدة الشاذة المكتشفة: {count_abnormal}\n"
+                            f"- عدد تنبيهات النقدية والوسيطة: {count_warnings}\n\n"
+                            "اكتب التقرير باللغة العربية الفصحى وبشكل مهني ليتضمن:\n"
+                            "1. ملخص تنفيذي.\n"
+                            "2. تحليل المخاطر والأرصدة الشاذة.\n"
+                            "3. تقييم السيولة والنقدية.\n"
+                            "4. التوصيات والإجراءات التصحيحية الفورية."
+                        )
                         
                         response = client.chat.completions.create(
                             model="gpt-4o",
@@ -266,7 +250,7 @@ if uploaded_file is not None:
                         )
                         st.session_state['report_content'] = response.choices[0].message.content
                     except Exception as e:
-                        st.error(f"حدث خطأ أثناء الاتصال بالنظام: {e}")
+                        st.error(f"حدث خطأ أثناء الاتصال بالنظام: {str(e)}")
 
         if 'report_content' in st.session_state:
             st.subheader("📋 التقرير الرقابي النهائي")
